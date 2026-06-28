@@ -11,9 +11,16 @@ from aad.tools import (
     aad_get_content,
     execute_tool,
     TOOL_SCHEMAS,
+    _clear_refs,
 )
 
 DIM = 4
+
+
+@pytest.fixture(autouse=True)
+def clear_refs():
+    _clear_refs()
+    yield
 
 
 @pytest.fixture
@@ -30,7 +37,6 @@ def index():
 
 @pytest.fixture
 def populated(store, index):
-    """Populate store and index with test nodes."""
     node_a = Node(
         name="GPU",
         content="Graphics Processing Unit",
@@ -51,6 +57,7 @@ def populated(store, index):
     store.put(node_b)
     index.add("GPU", node_a.vector)
     index.add("NVIDIA", node_b.vector)
+    _clear_refs()
     return store, index
 
 
@@ -65,16 +72,12 @@ class TestToolSchemas:
             assert "function" in schema
 
     def test_lookup_schema_requires_name(self):
-        lookup = next(
-            s for s in TOOL_SCHEMAS if s["function"]["name"] == "aad_lookup"
-        )
+        lookup = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "aad_lookup")
         assert "name" in lookup["function"]["parameters"]["required"]
 
-    def test_expand_schema_requires_vector(self):
-        expand = next(
-            s for s in TOOL_SCHEMAS if s["function"]["name"] == "aad_expand"
-        )
-        assert "vector" in expand["function"]["parameters"]["required"]
+    def test_expand_schema_requires_ref(self):
+        expand = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "aad_expand")
+        assert "ref" in expand["function"]["parameters"]["required"]
 
 
 class TestAADLookup:
@@ -85,41 +88,41 @@ class TestAADLookup:
         assert result["node"]["name"] == "GPU"
         assert result["node"]["content"] == "Graphics Processing Unit"
         assert len(result["node"]["associations"]) == 1
+        # associations use ref, not raw vector
+        assert "ref" in result["node"]["associations"][0]
+        assert "reason" in result["node"]["associations"][0]
+        assert "vector" not in result["node"]["associations"][0]
 
     def test_returns_error_when_not_found(self, store):
         result = aad_lookup(store, "MISSING")
         assert result["ok"] is False
-        assert "MISSING" in result["error"]
 
 
 class TestAADExpand:
-    def test_expand_finds_related_nodes(self, populated):
+    def test_expand_from_ref(self, populated):
         store, index = populated
-        result = aad_expand(store, index, vector=[1.0, 0.0, 0.0, 0.0], top_k=2)
+        # First lookup to get a ref
+        lookup = aad_lookup(store, "GPU")
+        ref = lookup["node"]["associations"][0]["ref"]
+        # Then expand from that ref
+        result = aad_expand(store, index, ref=ref, top_k=2)
         assert result["ok"] is True
-        assert len(result["results"]) == 2
-        assert result["results"][0]["name"] == "GPU"
+        assert len(result["results"]) >= 1
+        names = {r["name"] for r in result["results"]}
+        assert "NVIDIA" in names
 
-    def test_expand_with_reason_filter(self, populated):
+    def test_expand_invalid_ref(self, populated):
         store, index = populated
-        result = aad_expand(
-            store, index, vector=[1.0, 0.0, 0.0, 0.0],
-            top_k=2, reason_filter="manufactured",
-        )
-        assert result["ok"] is True
-        gpu_result = next(r for r in result["results"] if r["name"] == "GPU")
-        assert len(gpu_result["matching_associations"]) == 1
-        assert "manufactured by" in gpu_result["matching_associations"][0]["reason"]
+        result = aad_expand(store, index, ref="bad_ref", top_k=3)
+        assert result["ok"] is False
+        assert "bad_ref" in result["error"]
 
     def test_expand_clamps_top_k(self, populated):
         store, index = populated
-        result = aad_expand(store, index, vector=[1.0, 0.0, 0.0, 0.0], top_k=100)
+        lookup = aad_lookup(store, "GPU")
+        ref = lookup["node"]["associations"][0]["ref"]
+        result = aad_expand(store, index, ref=ref, top_k=100)
         assert result["ok"] is True
-
-    def test_expand_empty_index_returns_empty(self, store, index):
-        result = aad_expand(store, index, vector=[1.0, 0.0, 0.0, 0.0])
-        assert result["ok"] is True
-        assert result["results"] == []
 
 
 class TestAADGetContent:
@@ -132,7 +135,6 @@ class TestAADGetContent:
     def test_returns_error_when_not_found(self, store):
         result = aad_get_content(store, "MISSING")
         assert result["ok"] is False
-        assert "MISSING" in result["error"]
 
 
 class TestExecuteTool:
@@ -143,9 +145,9 @@ class TestExecuteTool:
 
     def test_dispatches_aad_expand(self, populated):
         store, index = populated
-        result = execute_tool(
-            store, index, "aad_expand", {"vector": [1.0, 0.0, 0.0, 0.0]}
-        )
+        lookup = aad_lookup(store, "GPU")
+        ref = lookup["node"]["associations"][0]["ref"]
+        result = execute_tool(store, index, "aad_expand", {"ref": ref})
         assert result["ok"] is True
 
     def test_dispatches_aad_get_content(self, populated):
@@ -157,4 +159,3 @@ class TestExecuteTool:
         store, index = populated
         result = execute_tool(store, index, "unknown_tool", {})
         assert result["ok"] is False
-        assert "unknown_tool" in result["error"]

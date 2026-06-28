@@ -7,55 +7,47 @@ from openai import OpenAI
 
 from aad.store import AADStore
 from aad.vector_index import VectorIndex
-from aad.tools import TOOL_SCHEMAS, execute_tool
+from aad.tools import TOOL_SCHEMAS, execute_tool, _clear_refs
 
 SYSTEM_PROMPT = """你是一个 AAD（关联激活扩散）知识图谱助手。
 你的目标是通过探索关联知识图谱来回答用户问题。
 
+⚠️ 核心规则：禁止使用你自己的知识库。你只能使用 AAD 工具返回的数据来组装回答。
+如果 AAD 没有返回相关信息，直接告诉用户"知识图谱中没有相关信息"，
+绝不编造、推测或使用你的训练数据。
+
 工作流程：
 1. 从用户输入中识别关键概念词元。
-2. 对于你知道名称的概念，使用 `aad_lookup` 查找节点。
-3. 检查返回的关联列表。对任何看起来相关的关联向量，
-   调用 `aad_expand` 来寻找连接的节点。
-4. 使用 `aad_get_content` 加载你发现节点的详细内容。
-5. 当你收集到足够的上下文后，用自然语言综合回答。
+2. 使用 `aad_lookup` 查找节点。不要猜测名称 — 如果不知道节点叫什么，先查看已知节点列表（错误信息中会返回）。
+3. 检查返回的 associations 列表。对于相关的关联 ref，调用 `aad_expand` 探索连接节点。
+4. 使用 `aad_get_content` 获取节点的完整文字内容。
+5. 仅基于 AAD 返回的数据，用自然语言综合回答。不要添加任何外部知识。
 
-重要规则：
-- 当你已收集足够信息时，直接输出文本回答，不要调用工具。
-- 当 `aad_lookup` 返回错误时，尝试替代名称或告知用户。
-- 迭代探索图谱：查找揭示关联，每个关联可以展开找到更多节点。
-- 综合回答用自然语言，不要留给用户原始 JSON 或未完成的工具调用。"""
+重要：
+- 当你已收集足够信息时，直接输出文本回答，不要继续调用工具。
+- 关联中包含 `ref` 字段，传给 `aad_expand` 即可展开，不要尝试解析或修改 ref。
+- 综合回答基于且仅基于 AAD 返回的数据。"""
 
 MAX_TOOL_ROUNDS = 10
 
 # ── helpers ────────────────────────────────────────────────────────
 
-def _truncate_vector(vec: list[float], n: int = 4) -> str:
-    if not vec:
-        return "[]"
-    if len(vec) <= n:
-        return str(vec)
-    return f"[{', '.join(f'{v:.4f}' for v in vec[:n])}, … ({len(vec)} dims)]"
-
-
 def _format_result(result: dict[str, Any]) -> str:
-    """Format a tool result for logging, truncating long vectors."""
+    """Format a tool result for logging."""
     ok = result.get("ok", False)
     if not ok:
         return f"✗ {result.get('error', 'unknown error')}"
 
     if "node" in result:
         node = result["node"]
-        vec = _truncate_vector(node.get("vector", []))
         assocs = node.get("associations", [])
         assoc_strs = [
-            f"  [{a['reason']}] → {_truncate_vector(a.get('vector',[]))}"
+            f"  ref={a['ref']} → [{a['reason']}]"
             for a in assocs
         ]
         return (
             f"✓ node: {node['name']}\n"
-            f"  content: {node.get('content','')[:80]}...\n"
-            f"  vector: {vec}\n"
+            f"  content: {node.get('content','')[:100]}...\n"
             f"  associations ({len(assocs)}):\n" +
             "\n".join(assoc_strs)
         )
@@ -63,7 +55,13 @@ def _format_result(result: dict[str, Any]) -> str:
     if "results" in result:
         items = []
         for r in result["results"]:
-            items.append(f"  {r['name']} (score={r.get('score','?')}) — {r.get('content','')[:60]}...")
+            assocs = r.get("associations", [])
+            assoc_refs = ", ".join(a.get("ref","?") for a in assocs)
+            items.append(
+                f"  {r['name']} (score={r.get('score','?')}) "
+                f"— {r.get('content','')[:60]}... "
+                f"[refs: {assoc_refs}]"
+            )
         return f"✓ {len(items)} results:\n" + "\n".join(items)
 
     if "content" in result:
@@ -95,6 +93,7 @@ class AADAgent:
         self._verbose = verbose
 
     def run(self, user_query: str) -> str:
+        _clear_refs()  # fresh ref table each query
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_query},
@@ -148,12 +147,6 @@ class AADAgent:
 
                 if self._verbose:
                     args_str = json.dumps(arguments, ensure_ascii=False, indent=2)
-                    # truncate vector in log
-                    if "vector" in arguments:
-                        vec = arguments["vector"]
-                        arguments["vector"] = f"[{len(vec)} floats]"
-                        args_str = json.dumps(arguments, ensure_ascii=False, indent=2)
-                        arguments["vector"] = vec  # restore
                     print(f"  → {tc.function.name}({args_str})")
 
                 result = execute_tool(

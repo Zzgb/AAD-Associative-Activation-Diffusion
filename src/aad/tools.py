@@ -4,13 +4,53 @@ Each tool returns a dict with an "ok" key:
   - ok=True  → result contains the requested data
   - ok=False → error contains a human-readable message
 
-Tool schemas are exposed as TOOL_SCHEMAS for consumption by LLM SDKs.
+Key design: raw vectors are NEVER passed to the LLM. A session-level
+ref table maps short string refs to full vectors. The LLM only sees
+ref strings; resolve happens server-side in execute_tool.
 """
 
 from typing import Any
 
 from aad.store import AADStore
 from aad.vector_index import VectorIndex
+
+# ──────────────────────────────────────────────────────────────────
+# Vector Ref Table (session-scoped, prevents LLM vector truncation)
+# ──────────────────────────────────────────────────────────────────
+
+# ref → full vector
+_ref_table: dict[str, list[float]] = {}
+_ref_counter: int = 0
+
+
+def _make_ref(vector: list[float]) -> str:
+    """Store a vector and return a short ref string for the LLM."""
+    global _ref_counter
+    ref = f"v{_ref_counter}"
+    _ref_counter += 1
+    _ref_table[ref] = vector
+    return ref
+
+
+def _resolve_ref(ref: str) -> list[float] | None:
+    """Look up a ref in the session table."""
+    return _ref_table.get(ref)
+
+
+def _clear_refs() -> None:
+    """Reset the ref table (call between sessions)."""
+    global _ref_counter
+    _ref_table.clear()
+    _ref_counter = 0
+
+
+def _assoc_to_llm(assoc) -> dict[str, Any]:
+    """Convert an Association to LLM-safe dict (ref instead of vector)."""
+    return {
+        "ref": _make_ref(assoc.vector),
+        "reason": assoc.reason,
+    }
+
 
 # ──────────────────────────────────────────────────────────────────
 # Tool Schemas (OpenAI / DeepSeek function-calling format)
@@ -23,15 +63,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "aad_lookup",
             "description": (
                 "在 AAD 知识图谱中通过名称精确查找节点。"
-                "返回完整节点，包含内容、嵌入向量和所有关联。"
-                "当你已知某个概念名称需要查找其详细信息时使用。"
+                "返回节点内容以及关联列表（每个关联有一个 ref 引用和原因描述）。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "要查找的节点名称（如 'GPU', 'NVIDIA', '黄仁勋'）",
+                        "description": "节点名称（如 'GPU', 'NVIDIA', '黄仁勋'）",
                     }
                 },
                 "required": ["name"],
@@ -43,29 +82,23 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "aad_expand",
             "description": (
-                "从给定的嵌入向量出发，进行近似最近邻搜索，寻找知识图谱中的关联节点。"
-                "可选的 reason_filter 仅保留关联原因中包含指定文本的结果。"
-                "用于从概念向外发散探索图谱。"
+                "从一个关联 ref 出发，寻找知识图谱中的关联节点。"
+                "传入 aad_lookup 返回的 associations 中某个关联的 ref。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "vector": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "查询嵌入向量（通常取自某个节点的关联向量或自身向量）",
+                    "ref": {
+                        "type": "string",
+                        "description": "关联引用 ID（从 aad_lookup 返回的 associations 中的 ref 字段获取）",
                     },
                     "top_k": {
                         "type": "integer",
                         "description": "最大返回结果数（默认 3）",
                         "default": 3,
                     },
-                    "reason_filter": {
-                        "type": "string",
-                        "description": "可选。仅返回关联原因中包含此文本的节点",
-                    },
                 },
-                "required": ["vector"],
+                "required": ["ref"],
             },
         },
     },
@@ -74,15 +107,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "aad_get_content",
             "description": (
-                "仅获取节点的纯文本内容，不返回向量和关联。"
-                "当你已知节点存在，只需其文字描述来构建回答上下文时使用。"
+                "获取节点的完整文字内容。当你通过 aad_lookup 或 aad_expand "
+                "发现了节点名称，需要其详细描述时使用。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "要获取内容的节点名称",
+                        "description": "节点名称",
                     }
                 },
                 "required": ["name"],
@@ -97,29 +130,35 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 def aad_lookup(store: AADStore, name: str) -> dict[str, Any]:
-    """Look up a node by exact name. Returns full node data."""
+    """Look up a node by exact name. Returns node with ref-based associations."""
     node = store.get(name)
     if node is None:
         return {
             "ok": False,
-            "error": f"Node not found: {name!r}. Available nodes: {store.list_names()}",
+            "error": f"节点未找到: {name!r}。已知节点: {store.list_names()}",
         }
     return {
         "ok": True,
-        "node": node.model_dump(),
+        "node": {
+            "name": node.name,
+            "content": node.content,
+            "associations": [_assoc_to_llm(a) for a in node.associations],
+        },
     }
 
 
 def aad_expand(
     store: AADStore,
     index: VectorIndex,
-    vector: list[float],
+    ref: str,
     top_k: int = 3,
-    reason_filter: str | None = None,
 ) -> dict[str, Any]:
-    """Search for nodes near the given vector, optionally filtered by reason."""
-    top_k = max(1, min(top_k, 20))
+    """Search for nodes near the vector referenced by ref."""
+    vector = _resolve_ref(ref)
+    if vector is None:
+        return {"ok": False, "error": f"无效的引用: {ref!r}，请使用 aad_lookup 返回的 ref"}
 
+    top_k = max(1, min(top_k, 20))
     raw_results = index.search(vector, top_k=top_k)
     if not raw_results:
         return {"ok": True, "results": []}
@@ -129,24 +168,12 @@ def aad_expand(
         node = store.get(name)
         if node is None:
             continue
-
-        matching_associations: list[dict[str, Any]] = []
-        if reason_filter is not None:
-            for assoc in node.associations:
-                if reason_filter.lower() in assoc.reason.lower():
-                    matching_associations.append(assoc.model_dump())
-
-        entry: dict[str, Any] = {
+        results.append({
             "name": node.name,
             "content": node.content,
             "score": round(float(score), 4),
-        }
-        if reason_filter is not None:
-            entry["matching_associations"] = matching_associations
-        else:
-            entry["associations"] = [a.model_dump() for a in node.associations]
-
-        results.append(entry)
+            "associations": [_assoc_to_llm(a) for a in node.associations],
+        })
 
     return {"ok": True, "results": results}
 
@@ -157,7 +184,7 @@ def aad_get_content(store: AADStore, name: str) -> dict[str, Any]:
     if content is None:
         return {
             "ok": False,
-            "error": f"Node not found: {name!r}. Available nodes: {store.list_names()}",
+            "error": f"节点未找到: {name!r}。已知节点: {store.list_names()}",
         }
     return {"ok": True, "name": name, "content": content}
 
@@ -173,18 +200,17 @@ def execute_tool(
     tool_name: str,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Dispatch a tool call by name. Returns the tool's result dict."""
+    """Dispatch a tool call by name. Resolves refs server-side."""
     if tool_name == "aad_lookup":
         return aad_lookup(store, name=arguments["name"])
     elif tool_name == "aad_expand":
         return aad_expand(
             store=store,
             index=index,
-            vector=arguments["vector"],
+            ref=arguments["ref"],
             top_k=arguments.get("top_k", 3),
-            reason_filter=arguments.get("reason_filter"),
         )
     elif tool_name == "aad_get_content":
         return aad_get_content(store, name=arguments["name"])
     else:
-        return {"ok": False, "error": f"Unknown tool: {tool_name!r}"}
+        return {"ok": False, "error": f"未知工具: {tool_name!r}"}
