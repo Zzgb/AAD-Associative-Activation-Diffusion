@@ -30,7 +30,7 @@ def mock_index():
 
 @pytest.fixture
 def agent(mock_store, mock_index):
-    return AADAgent(mock_store, mock_index, api_key="sk-test")
+    return AADAgent(mock_store, mock_index, api_key="sk-test", verbose=False)
 
 
 def _make_text_response(text: str):

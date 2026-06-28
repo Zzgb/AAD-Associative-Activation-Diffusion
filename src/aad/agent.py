@@ -26,16 +26,56 @@ SYSTEM_PROMPT = """你是一个 AAD（关联激活扩散）知识图谱助手。
 - 迭代探索图谱：查找揭示关联，每个关联可以展开找到更多节点。
 - 综合回答用自然语言，不要留给用户原始 JSON 或未完成的工具调用。"""
 
-MAX_TOOL_ROUNDS = 10  # 安全兜底，LLM 通常 2-4 轮自主停止
+MAX_TOOL_ROUNDS = 10
 
+# ── helpers ────────────────────────────────────────────────────────
+
+def _truncate_vector(vec: list[float], n: int = 4) -> str:
+    if not vec:
+        return "[]"
+    if len(vec) <= n:
+        return str(vec)
+    return f"[{', '.join(f'{v:.4f}' for v in vec[:n])}, … ({len(vec)} dims)]"
+
+
+def _format_result(result: dict[str, Any]) -> str:
+    """Format a tool result for logging, truncating long vectors."""
+    ok = result.get("ok", False)
+    if not ok:
+        return f"✗ {result.get('error', 'unknown error')}"
+
+    if "node" in result:
+        node = result["node"]
+        vec = _truncate_vector(node.get("vector", []))
+        assocs = node.get("associations", [])
+        assoc_strs = [
+            f"  [{a['reason']}] → {_truncate_vector(a.get('vector',[]))}"
+            for a in assocs
+        ]
+        return (
+            f"✓ node: {node['name']}\n"
+            f"  content: {node.get('content','')[:80]}...\n"
+            f"  vector: {vec}\n"
+            f"  associations ({len(assocs)}):\n" +
+            "\n".join(assoc_strs)
+        )
+
+    if "results" in result:
+        items = []
+        for r in result["results"]:
+            items.append(f"  {r['name']} (score={r.get('score','?')}) — {r.get('content','')[:60]}...")
+        return f"✓ {len(items)} results:\n" + "\n".join(items)
+
+    if "content" in result:
+        return f"✓ content of '{result['name']}': {result['content'][:120]}..."
+
+    return json.dumps(result, ensure_ascii=False, indent=2)[:300]
+
+
+# ── agent ──────────────────────────────────────────────────────────
 
 class AADAgent:
-    """Orchestrates AAD tool calls via DeepSeek Chat API.
-
-    Usage:
-        agent = AADAgent(store, index, api_key="sk-...")
-        answer = agent.run("黄仁勋是谁？")
-    """
+    """Orchestrates AAD tool calls via DeepSeek Chat API."""
 
     def __init__(
         self,
@@ -44,6 +84,7 @@ class AADAgent:
         api_key: str,
         base_url: str = "https://api.deepseek.com/v1",
         model: str = "deepseek-chat",
+        verbose: bool = True,
     ) -> None:
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY is required")
@@ -51,15 +92,15 @@ class AADAgent:
         self._index = index
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = model
+        self._verbose = verbose
 
     def run(self, user_query: str) -> str:
-        """Process a user query end-to-end. Returns the final answer string."""
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_query},
         ]
 
-        for _round in range(MAX_TOOL_ROUNDS):
+        for round_num in range(1, MAX_TOOL_ROUNDS + 1):
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
@@ -69,9 +110,17 @@ class AADAgent:
 
             msg = response.choices[0].message
 
-            # LLM 自主决定：无 tool_calls → 已收集足够上下文，停止循环
+            # 无 tool_calls → LLM 自主停止
             if not msg.tool_calls:
+                if self._verbose:
+                    print(f"\n{'─'*50}")
+                    print(f"[轮次 {round_num}] LLM 决定停止，输出最终答案")
+                    print(f"{'─'*50}\n")
                 return msg.content or ""
+
+            if self._verbose:
+                print(f"\n{'─'*50}")
+                print(f"[轮次 {round_num}] LLM 调用 {len(msg.tool_calls)} 个工具")
 
             # 追加 assistant 消息
             messages.append({
@@ -90,27 +139,43 @@ class AADAgent:
                 ],
             })
 
-            # 执行所有工具调用，收集结果
+            # 执行工具
             for tc in msg.tool_calls:
                 try:
                     arguments = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     arguments = {}
+
+                if self._verbose:
+                    args_str = json.dumps(arguments, ensure_ascii=False, indent=2)
+                    # truncate vector in log
+                    if "vector" in arguments:
+                        vec = arguments["vector"]
+                        arguments["vector"] = f"[{len(vec)} floats]"
+                        args_str = json.dumps(arguments, ensure_ascii=False, indent=2)
+                        arguments["vector"] = vec  # restore
+                    print(f"  → {tc.function.name}({args_str})")
+
                 result = execute_tool(
-                    self._store,
-                    self._index,
-                    tc.function.name,
-                    arguments,
+                    self._store, self._index,
+                    tc.function.name, arguments,
                 )
+
+                if self._verbose:
+                    print(f"  ← {_format_result(result)}")
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
 
-        # 安全兜底：最后一轮不传 tools，强制输出文本回答
+        # 安全兜底
+        if self._verbose:
+            print(f"\n{'─'*50}")
+            print(f"[安全兜底] 超过 {MAX_TOOL_ROUNDS} 轮，强制输出")
+            print(f"{'─'*50}\n")
         response = self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
+            model=self._model, messages=messages,
         )
         return response.choices[0].message.content or ""
