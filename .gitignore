@@ -6,3 +6,4 @@ data/*.jsonl
 .pytest_cache/
 dist/
 *.egg-info/
+.claude/
