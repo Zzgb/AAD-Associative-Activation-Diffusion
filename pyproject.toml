@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aad"
+version = "1.0.0"
+description = "Associative Activation Diffusion — vector-based knowledge graph with LLM agent tools"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=2.0,<3",
+    "faiss-cpu>=1.7,<2",
+    "pydantic>=2.0,<3",
+    "pydantic-settings>=2.0,<3",
+    "numpy>=2.0,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<10",
+    "pytest-asyncio>=0.24,<2",
+]
+
+[project.scripts]
+aad = "aad.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
