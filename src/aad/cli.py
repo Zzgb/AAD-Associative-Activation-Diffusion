@@ -25,18 +25,14 @@ def main() -> None:
 
     # Initialize components
     store = AADStore(settings.store_path)
-    embedder = Embedder(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_embedding_model,
-    )
+    embedder = Embedder(model_name=settings.local_embedding_model)
     index = VectorIndex(dim=settings.embedding_dim)
 
     # Seed if empty
     if len(store) == 0:
-        print("Store is empty. Generating seed data...")
+        print(f"Store is empty. Generating seed data (model: {settings.local_embedding_model})...")
         count = seed_store(store, embedder)
-        print(f"Seeded {count} nodes. Embedding model: {settings.deepseek_embedding_model}")
+        print(f"Seeded {count} nodes.")
 
     # Rebuild FAISS index from store
     index.rebuild(store._nodes)
