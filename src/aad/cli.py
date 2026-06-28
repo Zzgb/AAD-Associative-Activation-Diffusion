@@ -30,7 +30,7 @@ def main() -> None:
 
     # Seed if empty
     if len(store) == 0:
-        print(f"Store is empty. Generating seed data (model: {settings.local_embedding_model})...")
+        print("Store is empty. Generating seed data...")
         count = seed_store(store, embedder)
         print(f"Seeded {count} nodes.")
 
