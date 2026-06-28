@@ -5,9 +5,6 @@ history with linear-chain associations. Same Node structure as
 long-term memory, lives in RAM, discarded on /quit.
 """
 
-from datetime import datetime, timezone
-from typing import Any
-
 from aad.models import Node, Association
 from aad.embedder import Embedder
 from aad.vector_index import VectorIndex
