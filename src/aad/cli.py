@@ -25,7 +25,7 @@ def main() -> None:
 
     # Initialize components
     store = AADStore(settings.store_path)
-    embedder = Embedder(model_name=settings.local_embedding_model)
+    embedder = Embedder(dim=settings.embedding_dim)
     index = VectorIndex(dim=settings.embedding_dim)
 
     # Seed if empty

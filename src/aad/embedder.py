@@ -1,55 +1,50 @@
-"""Embedding generation using local sentence-transformers model.
+"""Embedding generation via simple deterministic hashing.
 
-No external API calls needed — runs entirely locally.
-Default model: BAAI/bge-small-zh-v1.5 (512-d, optimized for Chinese).
+For prototype validation only — generates fixed-dimension vectors from
+text via SHA-256, no external API or model download needed.
+Replace with real embedding API (OpenAI / DeepSeek) in production.
 """
 
-from sentence_transformers import SentenceTransformer
-
-from aad.errors import EmbeddingError
+import hashlib
 
 
 class Embedder:
-    """Generates embeddings via a local sentence-transformers model.
+    """Deterministic hash-based embedder for prototype validation.
 
     Usage:
-        embedder = Embedder(model_name="BAAI/bge-small-zh-v1.5")
+        embedder = Embedder(dim=256)
         vec = embedder.embed("some text")
         vecs = embedder.embed_batch(["text1", "text2"])
     """
 
-    def __init__(
-        self,
-        model_name: str = "BAAI/bge-small-zh-v1.5",
-    ) -> None:
-        if not model_name:
-            raise EmbeddingError("Embedding model name is not set")
-        try:
-            self._model = SentenceTransformer(model_name)
-        except Exception as exc:
-            raise EmbeddingError(f"Failed to load model {model_name!r}: {exc}") from exc
+    def __init__(self, dim: int = 256) -> None:
+        if dim <= 0 or dim > 1024:
+            raise ValueError(f"dim must be 1–1024, got {dim}")
+        self._dim = dim
 
     def embed(self, text: str) -> list[float]:
-        """Generate an embedding vector for a single text string."""
+        """Generate a deterministic vector from text hash."""
         if not text.strip():
-            raise EmbeddingError("Cannot embed empty text")
-        try:
-            result = self._model.encode(text, normalize_embeddings=True)
-            return result.tolist()
-        except Exception as exc:
-            raise EmbeddingError(str(exc)) from exc
+            return [0.0] * self._dim
+        return self._hash_to_vector(text)
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embedding vectors for multiple texts."""
+        """Generate deterministic vectors for multiple texts."""
         if not texts:
             return []
-        non_empty = [t for t in texts if t.strip()]
-        if not non_empty:
-            return [[] for _ in texts]
-        try:
-            results = self._model.encode(
-                non_empty, normalize_embeddings=True, show_progress_bar=False
-            )
-            return [r.tolist() for r in results]
-        except Exception as exc:
-            raise EmbeddingError(str(exc)) from exc
+        return [self.embed(t) for t in texts]
+
+    def _hash_to_vector(self, text: str) -> list[float]:
+        """SHA-256 → normalized float vector of configured dimension."""
+        h = hashlib.sha256(text.encode()).digest()
+        # Expand hash to fill dim floats by cycling
+        vec = []
+        for i in range(self._dim):
+            b = h[i % len(h)]
+            # Normalize to [0, 1]
+            vec.append(b / 255.0)
+        # Normalize to unit vector (for FAISS IndexFlatIP = cosine similarity)
+        norm = sum(v * v for v in vec) ** 0.5
+        if norm > 0:
+            vec = [v / norm for v in vec]
+        return vec

@@ -15,6 +15,5 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_chat_model: str = "deepseek-chat"
-    local_embedding_model: str = "BAAI/bge-small-zh-v1.5"
-    embedding_dim: int = 512
+    embedding_dim: int = 256
     store_path: str = "data/aad_store.jsonl"
