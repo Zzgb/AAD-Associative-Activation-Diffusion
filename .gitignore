@@ -7,3 +7,4 @@ data/*.jsonl
 dist/
 *.egg-info/
 .claude/
+.DS_Store
