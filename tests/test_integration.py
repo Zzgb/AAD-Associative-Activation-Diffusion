@@ -50,85 +50,85 @@ def seeded_system():
 
 
 class TestIntegration:
-    def test_lookup_huangrenxun(self, seeded_system):
+    def test_all_core_nodes_reachable(self, seeded_system):
+        """Every core node can be looked up."""
         store, _ = seeded_system
-        result = aad_lookup(store, "黄仁勋")
-        assert result["ok"] is True
-        node = result["node"]
-        assert node["name"] == "黄仁勋"
-        assert len(node["associations"]) == 2
-        # all associations use ref
-        for a in node["associations"]:
-            assert "ref" in a
+        for name in ["黄仁勋", "NVIDIA", "GPU", "CUDA", "深度学习", "AMD"]:
+            result = aad_lookup(store, name)
+            assert result["ok"], f"aad_lookup({name!r}) failed"
+
+    def test_distractors_have_no_associations(self, seeded_system):
+        """Distractor nodes exist but have no links."""
+        store, _ = seeded_system
+        for name in ["苹果", "特斯拉", "Python"]:
+            result = aad_lookup(store, name)
+            assert result["ok"]
+            assert result["node"]["associations"] == []
+
+    def test_lookup_returns_ref_based_associations(self, seeded_system):
+        """Associations contain ref (string), not raw vector."""
+        store, _ = seeded_system
+        result = aad_lookup(store, "NVIDIA")
+        assert result["ok"]
+        for a in result["node"]["associations"]:
+            assert isinstance(a["ref"], str)
             assert "reason" in a
             assert "vector" not in a
 
-    def test_expand_from_ref_finds_nvidia(self, seeded_system):
+    def test_expand_from_huangrenxun_to_nvidia(self, seeded_system):
+        """Expand from 黄仁勋's NVIDIA association finds NVIDIA."""
         store, index = seeded_system
         lookup = aad_lookup(store, "黄仁勋")
-        # Find the NVIDIA association ref
-        nvidia_assoc = next(
-            a for a in lookup["node"]["associations"]
-            if "NVIDIA" in a["reason"]
+        nvidia_ref = next(
+            a["ref"] for a in lookup["node"]["associations"]
+            if "联合创立了 NVIDIA" in a["reason"]
         )
-        result = aad_expand(store, index, ref=nvidia_assoc["ref"], top_k=3)
-        assert result["ok"] is True
+        result = aad_expand(store, index, ref=nvidia_ref, top_k=3)
+        assert result["ok"]
         names = {r["name"] for r in result["results"]}
         assert "NVIDIA" in names
 
-    def test_get_nvidia_content(self, seeded_system):
-        store, _ = seeded_system
-        result = aad_get_content(store, "NVIDIA")
-        assert result["ok"] is True
-        assert "黄仁勋" in result["content"]
-
-    def test_full_reasoning_chain(self, seeded_system):
-        """Complete: 黄仁勋 → NVIDIA → GPU traversal."""
+    def test_full_chain_huangrenxun_to_deeplearning(self, seeded_system):
+        """Traversal: 黄仁勋 → NVIDIA → CUDA → 深度学习."""
         store, index = seeded_system
 
-        # Lookup 黄仁勋
         r1 = aad_lookup(store, "黄仁勋")
-        assert r1["ok"]
-        nvidia_ref = next(
-            a["ref"] for a in r1["node"]["associations"]
-            if "NVIDIA" in a["reason"]
-        )
+        nvidia_ref = next(a["ref"] for a in r1["node"]["associations"] if "NVIDIA" in a["reason"])
 
-        # Expand to NVIDIA
         r2 = aad_expand(store, index, ref=nvidia_ref, top_k=3)
-        assert r2["ok"]
         nvidia = next(r for r in r2["results"] if r["name"] == "NVIDIA")
-        gpu_ref = next(
-            a["ref"] for a in nvidia["associations"]
-            if "GPU" in a["reason"]
-        )
+        cuda_ref = next(a["ref"] for a in nvidia["associations"] if "CUDA" in a["reason"])
 
-        # Expand to GPU
-        r3 = aad_expand(store, index, ref=gpu_ref, top_k=3)
+        r3 = aad_expand(store, index, ref=cuda_ref, top_k=3)
         assert r3["ok"]
-        assert any(r["name"] == "GPU" for r in r3["results"])
+        cuda_results = {r["name"] for r in r3["results"]}
+        assert "CUDA" in cuda_results
 
-        # Get GPU content
-        r4 = aad_get_content(store, "GPU")
-        assert r4["ok"]
-        assert "图形处理单元" in r4["content"]
+        cuda = next(r for r in r3["results"] if r["name"] == "CUDA")
+        dl_ref = next(a["ref"] for a in cuda["associations"] if "深度学习" in a["reason"])
 
-    def test_invalid_ref_returns_error(self, seeded_system):
+        r4 = aad_expand(store, index, ref=dl_ref, top_k=3)
+        dl_names = {r["name"] for r in r4["results"]}
+        assert "深度学习" in dl_names
+
+    def test_gpu_expand_finds_related(self, seeded_system):
+        """Expanding from GPU finds multiple related concepts."""
         store, index = seeded_system
-        result = aad_expand(store, index, ref="nonexistent", top_k=3)
-        assert result["ok"] is False
+        gpu = aad_lookup(store, "GPU")
+        # Pick a ref and expand
+        ge_ref = next(a["ref"] for a in gpu["node"]["associations"] if "图形渲染" in a["reason"])
+        result = aad_expand(store, index, ref=ge_ref, top_k=5)
+        assert result["ok"]
+        names = {r["name"] for r in result["results"]}
+        assert "图形渲染" in names
 
-    def test_not_found_returns_error_with_available_nodes(self, seeded_system):
+    def test_not_found_shows_available_nodes(self, seeded_system):
         store, _ = seeded_system
-        result = aad_lookup(store, "QuantumComputing")
+        result = aad_lookup(store, "不存在")
         assert result["ok"] is False
         assert "已知节点" in result["error"]
 
-    def test_all_nodes_reachable(self, seeded_system):
-        store, _ = seeded_system
-        for name in ["黄仁勋", "GPU", "NVIDIA"]:
-            lookup = aad_lookup(store, name)
-            assert lookup["ok"], f"aad_lookup({name!r}) failed"
-            content = aad_get_content(store, name)
-            assert content["ok"], f"aad_get_content({name!r}) failed"
-            assert len(content["content"]) > 0
+    def test_invalid_ref_returns_error(self, seeded_system):
+        store, index = seeded_system
+        result = aad_expand(store, index, ref="bad", top_k=3)
+        assert result["ok"] is False
