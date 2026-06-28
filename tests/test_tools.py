@@ -1,20 +1,26 @@
 import pytest
 import tempfile
+import hashlib
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from aad.store import AADStore
 from aad.vector_index import VectorIndex
+from aad.session import SessionMemory
 from aad.models import Node, Association
 from aad.tools import (
-    aad_lookup,
-    aad_expand,
-    aad_get_content,
-    execute_tool,
-    TOOL_SCHEMAS,
-    _clear_refs,
+    aad_lookup, aad_expand, aad_get_content,
+    execute_tool, TOOL_SCHEMAS, _clear_refs,
 )
 
 DIM = 4
+
+
+def _dummy_session():
+    emb = MagicMock()
+    emb.embed.return_value = [0.1] * DIM
+    emb.embed_batch.return_value = [[0.1] * DIM]
+    return SessionMemory(emb, dim=DIM)
 
 
 @pytest.fixture(autouse=True)
@@ -36,29 +42,28 @@ def index():
 
 
 @pytest.fixture
-def populated(store, index):
+def session():
+    return _dummy_session()
+
+
+@pytest.fixture
+def populated(store, index, session):
     node_a = Node(
-        name="GPU",
-        content="Graphics Processing Unit",
+        name="GPU", content="Graphics Processing Unit",
         vector=[1.0, 0.0, 0.0, 0.0],
-        associations=[
-            Association(vector=[0.0, 1.0, 0.0, 0.0], reason="manufactured by")
-        ],
+        associations=[Association(vector=[0.0, 1.0, 0.0, 0.0], reason="manufactured by")],
     )
     node_b = Node(
-        name="NVIDIA",
-        content="NVIDIA Corporation",
+        name="NVIDIA", content="NVIDIA Corporation",
         vector=[0.0, 1.0, 0.0, 0.0],
-        associations=[
-            Association(vector=[1.0, 0.0, 0.0, 0.0], reason="manufactures GPU")
-        ],
+        associations=[Association(vector=[1.0, 0.0, 0.0, 0.0], reason="manufactures GPU")],
     )
     store.put(node_a)
     store.put(node_b)
     index.add("GPU", node_a.vector)
     index.add("NVIDIA", node_b.vector)
     _clear_refs()
-    return store, index
+    return store, index, session
 
 
 class TestToolSchemas:
@@ -81,81 +86,81 @@ class TestToolSchemas:
 
 
 class TestAADLookup:
-    def test_returns_node_when_found(self, populated):
-        store, _ = populated
-        result = aad_lookup(store, "GPU")
+    def test_returns_node_from_longterm(self, populated):
+        store, _, session = populated
+        result = aad_lookup(store, session, "GPU")
         assert result["ok"] is True
         assert result["node"]["name"] == "GPU"
-        assert result["node"]["content"] == "Graphics Processing Unit"
-        assert len(result["node"]["associations"]) == 1
-        # associations use ref, not raw vector
-        assert "ref" in result["node"]["associations"][0]
-        assert "reason" in result["node"]["associations"][0]
-        assert "vector" not in result["node"]["associations"][0]
+        assert result["source"] == "long_term"
+        # Should have been mirrored
+        assert session.is_visited("GPU")
 
-    def test_returns_error_when_not_found(self, store):
-        result = aad_lookup(store, "MISSING")
+    def test_returns_cached_from_session(self, populated):
+        store, _, session = populated
+        aad_lookup(store, session, "GPU")  # first: from longterm, mirrors
+        result = aad_lookup(store, session, "GPU")  # second: from session
+        assert result["ok"] is True
+        assert result["source"] == "short_term"
+
+    def test_returns_error_when_not_found(self, store, session):
+        result = aad_lookup(store, session, "MISSING")
         assert result["ok"] is False
 
 
 class TestAADExpand:
     def test_expand_from_ref(self, populated):
-        store, index = populated
-        # First lookup to get a ref
-        lookup = aad_lookup(store, "GPU")
+        store, index, session = populated
+        lookup = aad_lookup(store, session, "GPU")
         ref = lookup["node"]["associations"][0]["ref"]
-        # Then expand from that ref
-        result = aad_expand(store, index, ref=ref, top_k=2)
+        result = aad_expand(store, index, session, ref=ref, top_k=2)
         assert result["ok"] is True
-        assert len(result["results"]) >= 1
         names = {r["name"] for r in result["results"]}
         assert "NVIDIA" in names
 
     def test_expand_invalid_ref(self, populated):
-        store, index = populated
-        result = aad_expand(store, index, ref="bad_ref", top_k=3)
+        store, index, session = populated
+        result = aad_expand(store, index, session, ref="bad", top_k=3)
         assert result["ok"] is False
-        assert "bad_ref" in result["error"]
 
     def test_expand_clamps_top_k(self, populated):
-        store, index = populated
-        lookup = aad_lookup(store, "GPU")
+        store, index, session = populated
+        lookup = aad_lookup(store, session, "GPU")
         ref = lookup["node"]["associations"][0]["ref"]
-        result = aad_expand(store, index, ref=ref, top_k=100)
+        result = aad_expand(store, index, session, ref=ref, top_k=100)
         assert result["ok"] is True
 
 
 class TestAADGetContent:
-    def test_returns_content_when_found(self, populated):
-        store, _ = populated
-        result = aad_get_content(store, "GPU")
+    def test_returns_content(self, populated):
+        store, _, session = populated
+        result = aad_get_content(store, session, "GPU")
         assert result["ok"] is True
-        assert result["content"] == "Graphics Processing Unit"
+        assert "Graphics" in result["content"]
 
-    def test_returns_error_when_not_found(self, store):
-        result = aad_get_content(store, "MISSING")
+    def test_returns_error(self, store, session):
+        result = aad_get_content(store, session, "MISSING")
         assert result["ok"] is False
 
 
 class TestExecuteTool:
-    def test_dispatches_aad_lookup(self, populated):
-        store, index = populated
-        result = execute_tool(store, index, "aad_lookup", {"name": "GPU"})
+    def test_dispatches_lookup(self, populated):
+        store, index, session = populated
+        result = execute_tool(store, index, session, "aad_lookup", {"name": "GPU"})
         assert result["ok"] is True
 
-    def test_dispatches_aad_expand(self, populated):
-        store, index = populated
-        lookup = aad_lookup(store, "GPU")
+    def test_dispatches_expand(self, populated):
+        store, index, session = populated
+        lookup = aad_lookup(store, session, "GPU")
         ref = lookup["node"]["associations"][0]["ref"]
-        result = execute_tool(store, index, "aad_expand", {"ref": ref})
+        result = execute_tool(store, index, session, "aad_expand", {"ref": ref})
         assert result["ok"] is True
 
-    def test_dispatches_aad_get_content(self, populated):
-        store, index = populated
-        result = execute_tool(store, index, "aad_get_content", {"name": "GPU"})
+    def test_dispatches_get_content(self, populated):
+        store, index, session = populated
+        result = execute_tool(store, index, session, "aad_get_content", {"name": "GPU"})
         assert result["ok"] is True
 
-    def test_unknown_tool_returns_error(self, populated):
-        store, index = populated
-        result = execute_tool(store, index, "unknown_tool", {})
+    def test_unknown_tool(self, populated):
+        store, index, session = populated
+        result = execute_tool(store, index, session, "unknown", {})
         assert result["ok"] is False

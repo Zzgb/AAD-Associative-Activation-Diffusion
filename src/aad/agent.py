@@ -7,74 +7,68 @@ from openai import OpenAI
 
 from aad.store import AADStore
 from aad.vector_index import VectorIndex
+from aad.session import SessionMemory
 from aad.tools import TOOL_SCHEMAS, execute_tool, _clear_refs
 
-SYSTEM_PROMPT = """你是一个 AAD（关联激活扩散）知识图谱助手。
+SYSTEM_PROMPT_BASE = """你是一个 AAD（关联激活扩散）知识图谱助手。
 你只能使用 AAD 工具返回的数据回答问题。
 
 🚫 严格禁止：
 - 禁止使用训练数据、外部知识或常识
 - 禁止推理、推测、总结、归纳
 - 禁止添加数据中没有的形容词或评价
-- 你只能复述/转述 AAD 工具返回的原文内容
 
 ✅ 回答格式：
-- 如果两个节点没有共享关联（一方查不到另一方，或查不到对方的 ref），直接说：
-  "根据 AAD 知识图谱，[A] 和 [B] 之间没有关联。"
-- 如果某个节点查不到，直接说：
-  "知识图谱中没有 [X] 的相关信息。已知节点: [...]"
-- 有数据时，逐条引用原文，标明来自哪个节点。不要做任何数据之外的扩展。
+- 无关联 → "根据 AAD 知识图谱，[A] 和 [B] 之间没有关联。"
+- 查不到 → "知识图谱中没有 [X] 的相关信息。"
+- 有数据时，逐条引用原文，标明来自哪个节点。
 
 工作流程：
 1. 对用户提到的每个概念调用 `aad_lookup`。
-2. 检查两个节点的 associations 是否有交集（即一方包含指向另一方的 ref）。
-3. 有交集 → 调用 `aad_expand` 探索；无交集 → 直接告知无关联。
-4. 需要详细内容时调用 `aad_get_content`。
-5. 仅复述 AAD 返回的数据，不添加任何自己的话。"""
+2. 无交集 → 直接告知无关联。有交集 → `aad_expand`。
+3. 需要详情时调用 `aad_get_content`。"""
 
 MAX_TOOL_ROUNDS = 10
 
-# ── helpers ────────────────────────────────────────────────────────
+
+def _build_system_prompt(session: SessionMemory) -> str:
+    """Build system prompt with live session context."""
+    return SYSTEM_PROMPT_BASE + "\n\n" + session.summary()
+
 
 def _format_result(result: dict[str, Any]) -> str:
-    """Format a tool result for logging."""
+    """Format a tool result for verbose logging."""
     ok = result.get("ok", False)
     if not ok:
         return f"✗ {result.get('error', 'unknown error')}"
 
+    src = result.get("source", "?")
     if "node" in result:
         node = result["node"]
         assocs = node.get("associations", [])
-        assoc_strs = [
-            f"  ref={a['ref']} → [{a['reason']}]"
-            for a in assocs
-        ]
+        assoc_strs = [f"  ref={a['ref']} → [{a['reason']}]" for a in assocs]
         return (
-            f"✓ node: {node['name']}\n"
+            f"✓ [{src}] node: {node['name']}\n"
             f"  content: {node.get('content','')[:100]}...\n"
-            f"  associations ({len(assocs)}):\n" +
-            "\n".join(assoc_strs)
+            f"  associations ({len(assocs)}):\n" + "\n".join(assoc_strs)
         )
 
     if "results" in result:
         items = []
         for r in result["results"]:
             assocs = r.get("associations", [])
-            assoc_refs = ", ".join(a.get("ref","?") for a in assocs)
+            refs = ", ".join(a.get("ref", "?") for a in assocs)
             items.append(
-                f"  {r['name']} (score={r.get('score','?')}) "
-                f"— {r.get('content','')[:60]}... "
-                f"[refs: {assoc_refs}]"
+                f"  [{r.get('source','?')}] {r['name']} (score={r.get('score','?')}) "
+                f"— {r.get('content','')[:60]}... [refs: {refs}]"
             )
         return f"✓ {len(items)} results:\n" + "\n".join(items)
 
     if "content" in result:
-        return f"✓ content of '{result['name']}': {result['content'][:120]}..."
+        return f"✓ [{src}] content of '{result['name']}': {result['content'][:120]}..."
 
     return json.dumps(result, ensure_ascii=False, indent=2)[:300]
 
-
-# ── agent ──────────────────────────────────────────────────────────
 
 class AADAgent:
     """Orchestrates AAD tool calls via DeepSeek Chat API."""
@@ -96,10 +90,20 @@ class AADAgent:
         self._model = model
         self._verbose = verbose
 
-    def run(self, user_query: str) -> str:
-        _clear_refs()  # fresh ref table each query
+    def run(self, user_query: str, session: SessionMemory | None = None) -> str:
+        _clear_refs()
+
+        has_session = session is not None
+
+        # Create message node
+        if has_session:
+            msg_name = session.add_message(user_query)
+            session.begin_round()
+
+        # Build messages with dynamic system prompt
+        system_content = _build_system_prompt(session) if has_session else SYSTEM_PROMPT_BASE
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": user_query},
         ]
 
@@ -113,19 +117,20 @@ class AADAgent:
 
             msg = response.choices[0].message
 
-            # 无 tool_calls → LLM 自主停止
             if not msg.tool_calls:
                 if self._verbose:
                     print(f"\n{'─'*50}")
                     print(f"[轮次 {round_num}] LLM 决定停止，输出最终答案")
                     print(f"{'─'*50}\n")
+                # Commit inference links
+                if has_session:
+                    session.commit_round(msg_name)
                 return msg.content or ""
 
             if self._verbose:
                 print(f"\n{'─'*50}")
                 print(f"[轮次 {round_num}] LLM 调用 {len(msg.tool_calls)} 个工具")
 
-            # 追加 assistant 消息
             messages.append({
                 "role": "assistant",
                 "content": msg.content,
@@ -142,7 +147,6 @@ class AADAgent:
                 ],
             })
 
-            # 执行工具
             for tc in msg.tool_calls:
                 try:
                     arguments = json.loads(tc.function.arguments)
@@ -150,11 +154,11 @@ class AADAgent:
                     arguments = {}
 
                 if self._verbose:
-                    args_str = json.dumps(arguments, ensure_ascii=False, indent=2)
-                    print(f"  → {tc.function.name}({args_str})")
+                    print(f"  → {tc.function.name}({json.dumps(arguments, ensure_ascii=False, indent=2)})")
 
                 result = execute_tool(
                     self._store, self._index,
+                    session if has_session else _dummy_session(),
                     tc.function.name, arguments,
                 )
 
@@ -167,7 +171,6 @@ class AADAgent:
                     "content": json.dumps(result, ensure_ascii=False),
                 })
 
-        # 安全兜底
         if self._verbose:
             print(f"\n{'─'*50}")
             print(f"[安全兜底] 超过 {MAX_TOOL_ROUNDS} 轮，强制输出")
@@ -175,4 +178,12 @@ class AADAgent:
         response = self._client.chat.completions.create(
             model=self._model, messages=messages,
         )
+        if has_session:
+            session.commit_round(msg_name)
         return response.choices[0].message.content or ""
+
+
+def _dummy_session() -> SessionMemory:
+    """Fallback session when none provided (tests)."""
+    from aad.embedder import Embedder
+    return SessionMemory(Embedder(dim=4), dim=4)
