@@ -304,6 +304,10 @@ src/aad/
 ├── session.py        # 短期记忆：会话图谱 + 消息链 + 自动镜像
 ├── tools.py          # 4 个工具（lookup/expand/content/trace）
 ├── agent.py          # DeepSeek Chat 工具调用循环
-├── seed.py           # 种子数据（30 节点：科技 + 人物家族）
+├── seed.py           # 种子数据（31 节点：科技 + 人物家族）
 └── cli.py            # 交互式 CLI
 ```
+
+## 运行示例
+
+![AAD 运行示例](KK.png)
