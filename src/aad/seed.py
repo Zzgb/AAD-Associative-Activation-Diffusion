@@ -31,6 +31,14 @@ def create_seed_nodes(embedder: Embedder) -> list[Node]:
             ),
         },
         {
+            "name": "皮衣",
+            "content": (
+                "皮衣是一种由皮革制成的外套，常见款式包括机车夹克、飞行员夹克等。"
+                "在科技圈，黑色皮夹克因黄仁勋的长期穿着而成为一种标志性形象。"
+                "黄仁勋几乎在所有公开场合都穿着黑色皮夹克，被称为「穿皮衣的CEO」。"
+            ),
+        },
+        {
             "name": "NVIDIA",
             "content": (
                 "NVIDIA 公司是一家美国跨国技术公司，由黄仁勋（Jensen Huang）、"
@@ -326,6 +334,7 @@ def create_seed_nodes(embedder: Embedder) -> list[Node]:
         n[a].associations.append(Association(vector=n[b].vector, reason=reason_a))
         n[b].associations.append(Association(vector=n[a].vector, reason=reason_b))
 
+    link("黄仁勋", "皮衣", "标志性着装是黑色皮夹克，被称为穿皮衣的CEO", "黄仁勋的标志性着装，科技圈最知名的皮衣形象")
     link("黄仁勋", "NVIDIA", "联合创立了 NVIDIA（1993 年）", "由黄仁勋联合创立")
     link("NVIDIA", "GPU", "发明了 GPU（GeForce 256，1999 年）", "GPU 由 NVIDIA 发明")
     link("黄仁勋", "GPU", "领导了发明 GPU 的公司", "GPU 由黄仁勋领导的 NVIDIA 发明")
