@@ -150,7 +150,7 @@ def aad_lookup(
         lt_names = store.list_names()
         sm_names = [n for n in [name] if session.is_visited(n)]  # for error hint
         all_names = sorted(set(lt_names) | {n for n in sm_names})
-        return {"ok": False, "error": f"节点未找到: {name!r}。已知节点: {all_names}"}
+        return {"ok": False, "error": f"未找到或无法推理出相关节点: {name!r}"}
 
     # 3. Auto-mirror
     mirror = session.mirror_longterm(lt_node)
@@ -228,7 +228,7 @@ def aad_get_content(
     # Long-term
     content = store.get_content(name)
     if content is None:
-        return {"ok": False, "error": f"节点未找到: {name!r}。已知节点: {store.list_names()}"}
+        return {"ok": False, "error": f"未找到或无法推理出相关节点: {name!r}"}
     return {"ok": True, "name": name, "content": content, "source": "long_term"}
 
 
