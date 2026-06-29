@@ -110,7 +110,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "from": {"type": "string", "description": "起始节点名称"},
                     "to": {"type": "string", "description": "目标节点名称"},
-                    "max_depth": {"type": "integer", "description": "最大搜索深度（默认 5）", "default": 5},
+                    "max_depth": {"type": "integer", "description": "最大搜索深度（默认 20）", "default": 20},
                 },
                 "required": ["from", "to"],
             },
@@ -238,7 +238,7 @@ def aad_trace(
     session: SessionMemory,
     from_name: str,
     to_name: str,
-    max_depth: int = 5,
+    max_depth: int = 20,
 ) -> dict[str, Any]:
     """Bidirectional BFS to find shortest path between two nodes.
 
@@ -380,7 +380,7 @@ def execute_tool(
         return aad_trace(
             store=store, index=index, session=session,
             from_name=arguments["from"], to_name=arguments["to"],
-            max_depth=arguments.get("max_depth", 5),
+            max_depth=arguments.get("max_depth", 20),
         )
     else:
         return {"ok": False, "error": f"未知工具: {tool_name!r}"}
